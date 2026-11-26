@@ -1,0 +1,267 @@
+varnishtest "plone/caching.vcl"
+
+# Every request that reaches Plone is listed here, in order: a request that
+# should have come from the cache (or should not have) breaks the sequence.
+server s1 {
+    # 1. Cacheable page: once.
+    rxreq
+    expect req.url == "/page"
+    expect req.http.Cookie == <undef>
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60, must-revalidate" -body "page"
+
+    # 2. statusmessages cookie: passed.
+    rxreq
+    expect req.url == "/page"
+    expect req.http.Cookie == "statusmessages=abc"
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60" -body "page with message"
+
+    # 3. Logged in: passed, with the cookie.
+    rxreq
+    expect req.url == "/page"
+    expect req.http.Cookie == "__ac=xyz"
+    txresp -hdr "Cache-Control: private" -body "page for editor"
+
+    # 4. Static resource for a logged in user: without the cookie, cached.
+    rxreq
+    expect req.url == "/++plone++static/bundle.js"
+    expect req.http.Cookie == <undef>
+    txresp -hdr "Cache-Control: max-age=86400, public" -body "js"
+
+    # 5. No Cache-Control: not cached, so twice.
+    rxreq
+    expect req.url == "/personal"
+    txresp -body "personal"
+    rxreq
+    expect req.url == "/personal"
+    txresp -body "personal"
+
+    # 5b. Only Plone's "don't cache" Expires (one digit day): not cached.
+    rxreq
+    expect req.url == "/expires"
+    txresp -hdr "Expires: Sat, 1 Jan 2000 00:00:00 GMT" -body "e"
+    rxreq
+    expect req.url == "/expires"
+    txresp -hdr "Expires: Sat, 1 Jan 2000 00:00:00 GMT" -body "e"
+
+    # 6. Set-Cookie: not cached, so twice.
+    rxreq
+    expect req.url == "/sets-cookie"
+    txresp -hdr "Set-Cookie: x=1" -hdr "Cache-Control: max-age=0, s-maxage=60" -body "c"
+    rxreq
+    expect req.url == "/sets-cookie"
+    txresp -hdr "Set-Cookie: x=1" -hdr "Cache-Control: max-age=0, s-maxage=60" -body "c"
+
+    # 7. 404 without Cache-Control: cached all the same.
+    rxreq
+    expect req.url == "/missing"
+    txresp -status 404 -body "not found"
+
+    # 8. Server error: not cached, so twice.
+    rxreq
+    expect req.url == "/broken"
+    txresp -status 500 -hdr "Cache-Control: max-age=0, s-maxage=60" -body "error"
+    rxreq
+    expect req.url == "/broken"
+    txresp -status 500 -body "error"
+
+    # 9. After the PURGE (with another Host), the page is fetched again.
+    rxreq
+    expect req.url == "/page"
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60" -body "page again"
+
+    # 10. POST, PROPFIND and JSON are passed.
+    rxreq
+    expect req.method == "POST"
+    txresp -body "posted"
+    rxreq
+    expect req.method == "PROPFIND"
+    txresp -body "dav"
+    rxreq
+    expect req.http.Accept == "application/json"
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60" -body "{}"
+
+    # 11. BAN with a regular expression, for this host.
+    rxreq
+    expect req.url == "/news/one"
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60" -body "one"
+    rxreq
+    expect req.url == "/news/one"
+    txresp -hdr "Cache-Control: max-age=0, s-maxage=60" -body "one again"
+} -start
+
+varnish v1 -vcl+backend {
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
+    include "plone/caching.vcl";
+
+    acl plone_proxies { "192.0.2.0"/24; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
+
+    sub vcl_recv {
+        call plone_detect_client_ip;
+        call plone_block_junk;
+        call plone_recv;
+    }
+    sub vcl_miss { call plone_ratelimit; }
+    sub vcl_pass { call plone_ratelimit; }
+    sub vcl_backend_fetch { call plone_forward_client_ip; }
+    sub vcl_backend_response { call plone_backend_response; }
+    sub vcl_deliver { call plone_deliver; }
+    sub vcl_synth { call plone_synth; }
+} -start
+
+client c1 {
+    # 1. Cached; statistics cookies are dropped; s-maxage not passed on.
+    txreq -url "/page" -hdr "Host: www.example.org" -hdr "Cookie: _ga=1; _pk_id=2"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Cacheable == "YES"
+    expect resp.http.Cache-Control == "max-age=0, s-maxage=0, must-revalidate"
+    expect resp.http.x-plone-url == <undef>
+    txreq -url "/page" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.body == "page"
+
+    # 2. A status message is never served from the cache.
+    txreq -url "/page" -hdr "Host: www.example.org" -hdr "Cookie: _ga=1; statusmessages=abc"
+    rxresp
+    expect resp.body == "page with message"
+
+    # 3. Logged in.
+    txreq -url "/page" -hdr "Host: www.example.org" -hdr "Cookie: __ac=xyz"
+    rxresp
+    expect resp.body == "page for editor"
+
+    # 4. Static resource, first logged in, then anonymous from the cache.
+    txreq -url "/++plone++static/bundle.js" -hdr "Host: www.example.org" -hdr "Cookie: __ac=xyz"
+    rxresp
+    expect resp.body == "js"
+    txreq -url "/++plone++static/bundle.js" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+
+    # 5. No Cache-Control.
+    txreq -url "/personal" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "NO - no Cache-Control"
+    txreq -url "/personal" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+
+    # 5b. Expires alone.
+    txreq -url "/expires" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "NO - no Cache-Control"
+    txreq -url "/expires" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+
+    # 6. Set-Cookie.
+    txreq -url "/sets-cookie" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "NO - Set-Cookie"
+    txreq -url "/sets-cookie" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.Set-Cookie == "x=1"
+
+    # 7. 404.
+    txreq -url "/missing" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.X-Cacheable == "YES - 404, 5m"
+    txreq -url "/missing" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.X-Cache == "HIT"
+
+    # 8. 500.
+    txreq -url "/broken" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.status == 500
+    expect resp.http.Cache-Control == "no-cache, max-age=0, must-revalidate"
+    txreq -url "/broken" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.status == 500
+
+    # 9. PURGE as Plone sends it: the Host of Varnish, not the public one.
+    txreq -req PURGE -url "/page" -hdr "Host: varnish"
+    rxresp
+    expect resp.status == 200
+    expect resp.reason == "Purged"
+    txreq -url "/page" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.body == "page again"
+    expect resp.http.X-Cache == "MISS"
+
+    # 10. Passed methods and JSON.
+    txreq -req POST -url "/page" -hdr "Host: www.example.org" -body "x=1"
+    rxresp
+    expect resp.body == "posted"
+    txreq -req PROPFIND -url "/page" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.body == "dav"
+    txreq -url "/page" -hdr "Host: www.example.org" -hdr "Accept: application/json"
+    rxresp
+    expect resp.body == "{}"
+
+    # 11. BAN: a regular expression, only for the host it names.
+    txreq -url "/news/one" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.body == "one"
+    txreq -req BAN -url "^/other" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.status == 200
+    txreq -req BAN -url "^/news/" -hdr "Host: other.example.org"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/news/one" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    txreq -req BAN -url "^/news/" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.reason == "Banned"
+    txreq -url "/news/one" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.body == "one again"
+} -run
+
+# Errors and redirects from vcl_recv get plone_synth.
+varnish v1 -vcl+backend {
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
+    include "plone/caching.vcl";
+
+    acl plone_proxies { "192.0.2.0"/24; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
+
+    sub vcl_recv {
+        if (req.url == "/old") {
+            return (synth(301, "/new"));
+        }
+        call plone_detect_client_ip;
+        call plone_block_junk;
+        call plone_recv;
+    }
+    sub vcl_miss { call plone_ratelimit; }
+    sub vcl_pass { call plone_ratelimit; }
+    sub vcl_backend_fetch { call plone_forward_client_ip; }
+    sub vcl_backend_response { call plone_backend_response; }
+    sub vcl_deliver { call plone_deliver; }
+    sub vcl_synth { call plone_synth; }
+}
+
+client c2 {
+    txreq -url "/old"
+    rxresp
+    expect resp.status == 301
+    expect resp.http.Location == "/new"
+    expect resp.reason == "Moved Permanently"
+    txreq -url "/wp-login.php"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "text/html; charset=utf-8"
+} -run

@@ -1,4 +1,4 @@
-# Example default.vcl of a project, used by example/docker-compose.yml:
+# default.vcl of a Volto site, used by docker-compose.yml next to it:
 #
 #     client → Traefik :80 (entrypoint web) → Varnish
 #            → Traefik :8000 (entrypoint internal, VirtualHostMonster rewrite)
@@ -9,14 +9,15 @@
 # not published, so only Varnish (and other containers) can reach Plone
 # through it.
 #
-# Only the protection is shown here; the caching rules of the project go in
-# the same subroutines.
+# What is left here is specific to the site: backend, ACLs, and the order of
+# the calls.  Site specific rules (redirects, extra blocks) go before or after
+# the calls.
 vcl 4.1;
 
-import std;
-
-include "zest/client.vcl";
-include "zest/protection.vcl";
+include "plone/client.vcl";
+include "plone/protection.vcl";
+include "plone/caching.vcl";
+include "plone/volto.vcl";
 
 backend traefik {
     .host = "traefik";
@@ -29,51 +30,55 @@ backend traefik {
 # The proxies between the client and Varnish: here only Traefik, at its fixed
 # address in docker-compose.yml.  With a load balancer in front of Traefik,
 # add its addresses here, to the trustedIPs of Traefik's web entrypoint, and
-# a second call to zest_strip_proxy below.
-acl zest_proxies {
+# a second call to plone_strip_proxy below.
+acl plone_proxies {
     "172.31.231.10";
 }
 
-sub zest_strip_proxies {
+sub plone_strip_proxies {
     # Traefik.
-    call zest_strip_proxy;
+    call plone_strip_proxy;
 }
 
 # The containers of the stack, which send PURGE and BAN directly.
-acl zest_purge {
+acl plone_purge {
     "localhost";
     "172.31.231.0"/24;
 }
 
 sub vcl_recv {
     set req.backend_hint = traefik;
-    call zest_detect_client_ip;
-    call zest_block_junk;
-
-    if (req.method == "PURGE") {
-        call zest_purge_allowed;
-        return (purge);
-    }
-    if (req.method == "BAN") {
-        call zest_purge_allowed;
-        std.ban("req.http.host == " + req.http.host + " && req.url == " + req.url);
-        return (synth(200, "Ban added"));
-    }
+    call plone_detect_client_ip;
+    call plone_block_junk;
+    call plone_volto_recv;
+    call plone_recv;
 }
 
 sub vcl_miss {
-    call zest_ratelimit;
+    call plone_ratelimit;
 }
 
 sub vcl_pass {
-    call zest_ratelimit;
+    call plone_ratelimit;
 }
 
 sub vcl_pipe {
-    set bereq.http.X-Forwarded-For = req.http.x-client-ip;
-    unset bereq.http.x-client-ip;
+    call plone_forward_client_ip;
 }
 
 sub vcl_backend_fetch {
-    call zest_forward_client_ip;
+    call plone_forward_client_ip;
+}
+
+sub vcl_backend_response {
+    call plone_volto_backend_response;
+    call plone_backend_response;
+}
+
+sub vcl_deliver {
+    call plone_deliver;
+}
+
+sub vcl_synth {
+    call plone_synth;
 }

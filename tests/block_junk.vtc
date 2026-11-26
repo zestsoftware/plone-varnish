@@ -1,20 +1,20 @@
-varnishtest "zest_block_junk"
+varnishtest "plone_block_junk"
 
 server s1 {
 } -start
 
 varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
-    include "zest/client.vcl";
-    include "zest/protection.vcl";
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
 
-    acl zest_proxies { "127.0.0.1"; }
-    sub zest_strip_proxies { call zest_strip_proxy; }
-    acl zest_purge { "127.0.0.1"; }
+    acl plone_proxies { "127.0.0.1"; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
 
-    # Whatever zest_block_junk lets through gets a 200 from Varnish.
+    # Whatever plone_block_junk lets through gets a 200 from Varnish.
     sub vcl_recv {
-        call zest_detect_client_ip;
-        call zest_block_junk;
+        call plone_detect_client_ip;
+        call plone_block_junk;
         return (synth(200, "allowed"));
     }
 } -start

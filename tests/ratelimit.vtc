@@ -1,27 +1,29 @@
-varnishtest "zest_ratelimit"
+varnishtest "plone_ratelimit"
 
 # vsthrottle is a token bucket: it starts full and refills at limit/period
 # (10 or 30 per second).  Allowed requests get a 204 from Varnish itself, so
-# the requests are fast and only a few tokens come back during the test; a
-# few requests of slack before the expected 429 absorb those.
+# the requests are fast and only a few tokens come back during the test.  The
+# requests of slack before the expected 429 absorb those, also on a busy
+# machine (3 ms per request: 1 token per 33 requests anonymous, 1 per 11
+# logged in).
 
 server s1 {
 } -start
 
 varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
-    include "zest/client.vcl";
-    include "zest/protection.vcl";
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
 
-    acl zest_proxies { "127.0.0.1"; }
-    sub zest_strip_proxies { call zest_strip_proxy; }
-    acl zest_purge { "127.0.0.1"; }
+    acl plone_proxies { "127.0.0.1"; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
 
     sub vcl_recv {
-        call zest_detect_client_ip;
+        call plone_detect_client_ip;
         return (pass);
     }
     sub vcl_pass {
-        call zest_ratelimit;
+        call plone_ratelimit;
         return (synth(204));
     }
 } -start
@@ -33,7 +35,7 @@ client c1 {
         rxresp
         expect resp.status == 204
     }
-    loop 5 {
+    loop 30 {
         txreq -hdr "X-Forwarded-For: 192.0.2.10"
         rxresp
     }
@@ -57,7 +59,7 @@ client c1 {
         rxresp
         expect resp.status == 204
     }
-    loop 10 {
+    loop 100 {
         txreq -hdr "X-Forwarded-For: 192.0.2.20" -hdr "Authorization: Basic eDp5"
         rxresp
     }
