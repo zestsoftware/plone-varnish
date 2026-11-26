@@ -1,11 +1,14 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 1.1.0 (unreleased)
 
 - Neutral names, so that any Plone project (and cookieplone) can use it: the
   subroutines are `plone_*` instead of `zest_*`, the ACLs `plone_proxies` and
   `plone_purge`, and the includes are in `/etc/varnish/plone/` instead of
   `/etc/varnish/zest/`.  Rename them in your `default.vcl`.
+- MIT License instead of GPL-2.0, like cookieplone (`LICENSE.md`).  Added
+  `CONTRIBUTORS.md` and `version.txt`, which CI checks against the release
+  tag.
 - New `plone/caching.vcl`: the caching every Plone site needs, Classic UI and
   Volto, from the VCL of the cookieplone template and of plone.recipe.varnish.
   PURGE bans by URL whatever Host the purger sends; other methods are passed,

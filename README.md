@@ -210,7 +210,7 @@ compile error, not a hole you find later.
 The image, with your `default.vcl` on top:
 
 ```dockerfile
-FROM ghcr.io/zestsoftware/plone-varnish:2
+FROM ghcr.io/zestsoftware/plone-varnish:1
 COPY etc/varnish.vcl /etc/varnish/default.vcl
 ```
 
@@ -218,7 +218,7 @@ or use the image as it is, with `default.vcl` as a bind mount
 (`./varnish.vcl:/etc/varnish/default.vcl:ro`) or a Swarm config with target
 `/etc/varnish/default.vcl`.
 
-Tags: `2.1.3`, `2.1`, `2`, only for releases.  Pin a release; Dependabot or
+Tags: `1.2.3`, `1.2`, `1`, only for releases.  Pin a release; Dependabot or
 Renovate opens the update.
 
 ## Development
@@ -232,6 +232,20 @@ builds the image, runs the varnishtest cases in `tests/` and compiles the
 
 ## Release
 
-Add the version and date to `CHANGES.md`, commit, and push a tag with the
-version (`2.0.0`, no `v`).  CI tests it and pushes the image with the tags
-`2.0.0`, `2.0` and `2`.
+With [zest.releaser](https://zestreleaser.readthedocs.io/), on `main`:
+
+```
+uvx --from zest.releaser fullrelease
+```
+
+It takes the version from `version.txt` (`1.1.0.dev0` becomes `1.1.0`), dates
+the section in `CHANGES.md`, commits, tags (`1.1.0`, no `v`), goes back to
+development (`1.1.1.dev0`, a new changelog section) and pushes.  This is no
+Python package, so it builds and uploads nothing.  On the tag, CI checks that
+the tag matches `version.txt`, tests, and pushes the image with the tags
+`1.1.0`, `1.1` and `1`.
+
+## License
+
+MIT, see [LICENSE.md](LICENSE.md).  `plone/caching.vcl` is based on the VCL of
+the cookieplone templates (MIT) and plone.recipe.varnish (BSD).
