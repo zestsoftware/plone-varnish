@@ -1,4 +1,4 @@
-varnishtest "zest_ratelimit"
+varnishtest "plone_ratelimit"
 
 # vsthrottle is a token bucket: it starts full and refills at limit/period
 # (10 or 30 per second).  Allowed requests get a 204 from Varnish itself, so
@@ -9,19 +9,19 @@ server s1 {
 } -start
 
 varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
-    include "zest/client.vcl";
-    include "zest/protection.vcl";
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
 
-    acl zest_proxies { "127.0.0.1"; }
-    sub zest_strip_proxies { call zest_strip_proxy; }
-    acl zest_purge { "127.0.0.1"; }
+    acl plone_proxies { "127.0.0.1"; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
 
     sub vcl_recv {
-        call zest_detect_client_ip;
+        call plone_detect_client_ip;
         return (pass);
     }
     sub vcl_pass {
-        call zest_ratelimit;
+        call plone_ratelimit;
         return (synth(204));
     }
 } -start

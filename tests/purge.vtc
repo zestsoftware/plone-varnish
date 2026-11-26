@@ -1,26 +1,26 @@
-varnishtest "zest_purge_allowed"
+varnishtest "plone_purge_allowed"
 
 server s1 {
 } -start
 
 varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
-    include "zest/client.vcl";
+    include "plone/client.vcl";
 
-    acl zest_proxies { "127.0.0.1"; }
-    sub zest_strip_proxies { call zest_strip_proxy; }
-    acl zest_purge { "127.0.0.1"; }
+    acl plone_proxies { "127.0.0.1"; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
 
     sub vcl_recv {
-        call zest_detect_client_ip;
+        call plone_detect_client_ip;
         if (req.method == "PURGE") {
-            call zest_purge_allowed;
+            call plone_purge_allowed;
             return (purge);
         }
     }
 } -start
 
 client c1 {
-    # Directly from an address in zest_purge.
+    # Directly from an address in plone_purge.
     txreq -req PURGE -url /page
     rxresp
     expect resp.status == 200
@@ -31,18 +31,18 @@ client c1 {
     expect resp.status == 405
 } -run
 
-# Not in zest_purge at all.
+# Not in plone_purge at all.
 varnish v1 -vcl+backend {
-    include "zest/client.vcl";
+    include "plone/client.vcl";
 
-    acl zest_proxies { "127.0.0.1"; }
-    sub zest_strip_proxies { call zest_strip_proxy; }
-    acl zest_purge { "192.0.2.0"/24; }
+    acl plone_proxies { "127.0.0.1"; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "192.0.2.0"/24; }
 
     sub vcl_recv {
-        call zest_detect_client_ip;
+        call plone_detect_client_ip;
         if (req.method == "PURGE") {
-            call zest_purge_allowed;
+            call plone_purge_allowed;
             return (purge);
         }
     }

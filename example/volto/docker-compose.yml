@@ -1,6 +1,6 @@
 # Example stack: Plone 6 with Volto behind Traefik and Varnish.
 #
-#     cd example
+#     cd example/volto
 #     docker compose up -d --build
 #     open http://plone.localhost:8090      (admin / admin)
 #     docker compose down -v
@@ -36,10 +36,7 @@
 # reach Plone directly.  Port 8000 is only reachable inside the network.
 #
 # A site without Volto (Classic UI) needs one internal router instead of the
-# three, for all paths, with this rewrite:
-#
-#   replacepathregex.regex=^/(.*)
-#   replacepathregex.replacement=/VirtualHostBase/http/plone.localhost:8090/Plone/VirtualHostRoot/$$1
+# three: see ../classic/docker-compose.yml.
 #
 # On a server behind TLS the rewrites start with /VirtualHostBase/https/<host>:443/.
 
@@ -52,11 +49,14 @@ services:
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
+      # Only the containers of this stack: another stack on the same machine
+      # (the other example) has routers with the same names.
+      - --providers.docker.constraints=Label(`com.docker.compose.project`, `plone-varnish-example`)
       # Public: everything from outside.  No trustedIPs: X-Forwarded-For
       # from the client is replaced by the address of the client.
       - --entrypoints.web.address=:80
       # Internal: only for Varnish.  Its X-Forwarded-For (the client found
-      # by zest_detect_client_ip) is kept, so Volto and Plone see the client.
+      # by plone_detect_client_ip) is kept, so Volto and Plone see the client.
       - --entrypoints.internal.address=:8000
       - --entrypoints.internal.forwardedHeaders.trustedIPs=172.31.231.11
       - --accesslog=true
@@ -66,12 +66,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       default:
-        # In zest_proxies in default.vcl.
+        # In plone_proxies in default.vcl.
         ipv4_address: 172.31.231.10
 
   varnish:
-    # In a project: image: ghcr.io/zestsoftware/plone-varnish:1
-    build: ..
+    # In a project: image: ghcr.io/zestsoftware/plone-varnish:2
+    build: ../..
     volumes:
       - ./default.vcl:/etc/varnish/default.vcl:ro
     environment:

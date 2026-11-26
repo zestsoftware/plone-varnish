@@ -1,4 +1,4 @@
-varnishtest "zest_detect_client_ip and zest_forward_client_ip"
+varnishtest "plone_detect_client_ip and plone_forward_client_ip"
 
 # Varnish sees the connection from 127.0.0.1, the proxy in front of it.
 # The backend gets only the client in X-Forwarded-For.
@@ -36,18 +36,18 @@ server s1 {
 } -start
 
 varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
-    include "zest/client.vcl";
+    include "plone/client.vcl";
 
-    acl zest_proxies { "127.0.0.1"; "10.0.1.0"/24; }
-    sub zest_strip_proxies { call zest_strip_proxy; call zest_strip_proxy; }
-    acl zest_purge { "127.0.0.1"; }
+    acl plone_proxies { "127.0.0.1"; "10.0.1.0"/24; }
+    sub plone_strip_proxies { call plone_strip_proxy; call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
 
     sub vcl_recv {
-        call zest_detect_client_ip;
+        call plone_detect_client_ip;
         return (pass);
     }
     sub vcl_backend_fetch {
-        call zest_forward_client_ip;
+        call plone_forward_client_ip;
     }
 } -start
 

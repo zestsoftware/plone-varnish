@@ -9,4 +9,4 @@ LABEL org.opencontainers.image.title="plone-varnish" \
       org.opencontainers.image.licenses="GPL-2.0-only"
 
 # Included from the default.vcl of each project.
-COPY vcl/zest/ /etc/varnish/zest/
+COPY vcl/plone/ /etc/varnish/plone/

@@ -1,0 +1,114 @@
+# Example stack: Plone 6 Classic UI behind Traefik and Varnish.
+#
+#     cd example/classic
+#     docker compose up -d --build
+#     open http://plone.localhost:8091      (admin / admin)
+#     docker compose down -v
+#
+# The way a request goes:
+#
+#   browser
+#     │  http://plone.localhost:8091/news
+#     ▼
+#   Traefik, entrypoint web (:80, published as 8091)
+#     │  router rt-public: Host → Varnish.  Nothing is rewritten here, and
+#     │  Traefik puts the client in X-Forwarded-For (it trusts nobody on
+#     │  this entrypoint, so what the client sent is dropped).
+#     ▼
+#   Varnish (default.vcl): sees the public path /news, blocks junk, rate
+#     │  limit, cache; sends the request back to Traefik on its internal
+#     │  entrypoint, with only the client in X-Forwarded-For.
+#     ▼
+#   Traefik, entrypoint internal (:8000, not published)
+#     │  router rt-site, all paths: rewrite to
+#     │  /VirtualHostBase/http/plone.localhost:8091/Plone/VirtualHostRoot/news
+#     ▼
+#   Plone
+#
+# Why a separate internal entrypoint, and not a router on the public
+# entrypoint that matches a header like X-Varnish-Routed: anybody can send
+# that header, and would then skip Varnish (its blocks and rate limit) and
+# reach Plone directly.  Port 8000 is only reachable inside the network.
+#
+# On a server behind TLS the rewrite starts with /VirtualHostBase/https/<host>:443/.
+#
+# Purging: in Plone's Site Setup → Caching, enable purging with caching proxy
+# http://varnish:80, and leave "Virtual host rewriting takes place in front of
+# the caching proxy" off: here the rewrite happens behind Varnish.
+
+name: plone-varnish-example-classic
+
+services:
+
+  traefik:
+    image: traefik:v3.7
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      # Only the containers of this stack: another stack on the same machine
+      # (the other example) has routers with the same names.
+      - --providers.docker.constraints=Label(`com.docker.compose.project`, `plone-varnish-example-classic`)
+      # Public: everything from outside.  No trustedIPs: X-Forwarded-For
+      # from the client is replaced by the address of the client.
+      - --entrypoints.web.address=:80
+      # Internal: only for Varnish.  Its X-Forwarded-For (the client found
+      # by plone_detect_client_ip) is kept, so Plone sees the client.
+      - --entrypoints.internal.address=:8000
+      - --entrypoints.internal.forwardedHeaders.trustedIPs=172.31.232.11
+      - --accesslog=true
+    ports:
+      - "${PUBLIC_PORT:-8091}:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      default:
+        # In plone_proxies in default.vcl.
+        ipv4_address: 172.31.232.10
+
+  varnish:
+    # In a project: image: ghcr.io/zestsoftware/plone-varnish:2
+    build: ../..
+    volumes:
+      - ./default.vcl:/etc/varnish/default.vcl:ro
+    environment:
+      VARNISH_SIZE: 256M
+    depends_on:
+      - traefik
+    networks:
+      default:
+        # In the trustedIPs of Traefik's internal entrypoint.
+        ipv4_address: 172.31.232.11
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.svc-varnish.loadbalancer.server.port=80
+      - traefik.http.routers.rt-public.rule=Host(`plone.localhost`)
+      - traefik.http.routers.rt-public.entrypoints=web
+      - traefik.http.routers.rt-public.service=svc-varnish
+
+  backend:
+    image: plone/plone-backend:6.2.3
+    environment:
+      # Creates the site at the first start.
+      SITE: Plone
+      TYPE: classic
+    volumes:
+      - data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.svc-backend.loadbalancer.server.port=8080
+      - traefik.http.routers.rt-site.rule=Host(`plone.localhost`)
+      - traefik.http.routers.rt-site.entrypoints=internal
+      - traefik.http.routers.rt-site.service=svc-backend
+      - traefik.http.routers.rt-site.middlewares=mw-vhm
+      - "traefik.http.middlewares.mw-vhm.replacepathregex.regex=^/(.*)"
+      - "traefik.http.middlewares.mw-vhm.replacepathregex.replacement=/VirtualHostBase/http/plone.localhost:${PUBLIC_PORT:-8091}/Plone/VirtualHostRoot/$$1"
+
+networks:
+  default:
+    ipam:
+      config:
+        # Fixed, for the ACLs in default.vcl and Traefik's trustedIPs.
+        - subnet: 172.31.232.0/24
+
+volumes:
+  data: {}

@@ -1,29 +1,65 @@
 # plone-varnish
 
-Shared protection rules for the Varnish in front of Plone sites, as VCL include
-files and as an image: the official `varnish` image with the includes in
-`/etc/varnish/zest/`.
+Varnish for Plone sites, Classic UI and Volto: caching, protection against
+scanners and scrapers, and a rate limit, as VCL include files and as an image.
+The image is the official `varnish` image with the includes in
+`/etc/varnish/plone/`.
 
-Each project keeps its own `default.vcl` with what differs per site (backend,
-probe, ACLs, caching rules) and includes these files.  A change to the rules is
-then a new image tag in each project, instead of a copy in each project.
+A site keeps a short `default.vcl` with what differs per site (backend, ACLs,
+its own redirects or blocks) and includes these files.  Improvements to the
+rules then reach every site with a new image tag, instead of being copied
+from project to project.
 
-## What is in it
+- [example/volto/](example/volto/): a Volto site, Traefik, Varnish, Volto
+  and Plone.
+- [example/classic/](example/classic/): a Classic UI site, Traefik, Varnish
+  and Plone.
 
-`zest/client.vcl`
+```
+cd example/volto          # or example/classic
+docker compose up -d --build
+open http://plone.localhost:8090      # 8091 for classic; admin / admin
+docker compose down -v
+```
 
-- `zest_detect_client_ip`: sets `req.http.x-client-ip` from
+## How requests go
+
+```
+client → (load balancer) → Traefik, public entrypoint → Varnish
+       → Traefik, internal entrypoint: VirtualHostMonster rewrite → Volto / Plone
+```
+
+- **Varnish sees the public URL.**  The VirtualHostMonster rewrite happens
+  behind Varnish, when Traefik routes the request a second time.  So the rules
+  work on public paths, the same for every site, and a PURGE of a path matches
+  what is in the cache.
+- **Varnish goes back to Traefik on an internal entrypoint** that is not
+  published.  Not on the public entrypoint with a router that matches a
+  header such as `X-Varnish-Routed`: anybody can send that header and skip
+  Varnish.
+- **The client comes from `X-Forwarded-For`.**  Every proxy in front of
+  Varnish appends to it.  The first proxy you control trusts nothing from the
+  internet; each next one trusts the one before it (Traefik:
+  `forwardedHeaders.trustedIPs`).  Varnish passes only the client on, and
+  Traefik's internal entrypoint trusts Varnish, so Plone and Volto see the
+  client.
+
+## The includes
+
+`plone/client.vcl`
+
+- `plone_detect_client_ip`: sets `req.http.x-client-ip` from
   `X-Forwarded-For`, skipping your own proxies from the right (a fixed number
-  of hops, and only addresses in `zest_proxies`).  Addresses the client put in
+  of hops, and only addresses in `plone_proxies`).  Addresses the client put in
   front itself are ignored.
-- `zest_forward_client_ip`: sends only that client to the backend in
+- `plone_forward_client_ip`: sends only that client to the backend in
   `X-Forwarded-For`, so Traefik, Volto and Plone can't be given a forged one.
-- `zest_purge_allowed`: PURGE and BAN only directly from `zest_purge`, never
+- `plone_purge_allowed`: PURGE and BAN only directly from `plone_purge`, never
   through a proxy.
 
-`zest/protection.vcl`
+`plone/protection.vcl`
 
-- `zest_block_junk`: answers scanners and junk without the backend.  It looks
+- `plone_block_junk`: answers scanners and junk without the backend.  It looks
   at the path only, never at the query string.
   - 400: invalid UTF-8 (a server error in Zope), path traversal, characters
     that are never in a Plone path (quotes, `<>`, backslash, `{}`, `|`, `==`,
@@ -42,7 +78,7 @@ then a new image tag in each project, instead of a copy in each project.
   Not blocked, because a Plone site may have such content: names like
   `test`, `api`, `status`, `health`, `info`, `version`, `mcp`.  The rate limit
   takes care of scanners that try those.
-- `zest_ratelimit`: 100 backend requests per 10 seconds per client, 300 with a
+- `plone_ratelimit`: 100 backend requests per 10 seconds per client, 300 with a
   login cookie or `Authorization`.  Cache hits don't count.  Rejected requests
   get a 429 and are logged:
 
@@ -50,78 +86,131 @@ then a new image tag in each project, instead of a copy in each project.
   varnishlog -g request -q 'VCL_Log:ratelimit'
   ```
 
-## Assumptions
+`plone/caching.vcl`
 
-- **Varnish sees the public URL.**  The VirtualHostMonster rewrite happens
-  behind Varnish: Traefik → Varnish → Traefik (adds `/VirtualHostBase/…`) →
-  Volto/Plone.  The rules match on `req.url`.
-- **Varnish goes back to Traefik on an internal entrypoint**, one that is not
-  published.  Not on the public entrypoint with a router that matches a
-  header such as `X-Varnish-Routed`: anybody can send that header and skip
+- `plone_recv`:
+  - PURGE bans every cached object with that URL, whatever `Host` the purger
+    sends (Plone sends the host of Varnish, not the public one).  BAN takes a
+    regular expression on the URL, for the host it is sent to.
+  - Only GET and HEAD come from the cache.  Other methods are passed (not
+    piped, so they count for the rate limit); websockets are piped.
+  - Logged in users (`__ac`, `auth_token`, `_ZopeId`, `Authorization`) are
+    passed, except for static resources (`++plone++`, `++resource++`,
+    `++theme++`, `++webresource++`), which are the same for everybody.
+  - Cookies other than Plone's and a load balancer's are removed.  A request
+    that still has `statusmessages`, `I18N_LANGUAGE` or the clipboard is
+    passed: the page depends on it.
+  - JSON for a URL that also has an HTML page (plone.restapi with Classic UI)
+    is passed.  Large media and archives are streamed, not stored.
+- `plone_backend_response`: caches what the backend allows with
+  `Cache-Control` (plone.app.caching), never responses with `Set-Cookie`,
+  `private`, `no-cache` or `no-store`, nor responses without any caching
+  headers (no plone.app.caching rule: they may be personal).  404 for 5
+  minutes, icons for a day.  Errors are not cached; a failed background
+  refresh keeps serving the stale page.  Stale pages are served for at most a
+  minute while Plone is healthy, ten minutes while it is down.
+- `plone_deliver`: `X-Cache` (HIT or MISS) and `X-Cacheable` (why), and
+  `s-maxage=0` for caches after this one, so a purge reaches everything.
+- `plone_synth`: a plain error page, and redirects:
+  `return (synth(301, "/new/path"))` in `vcl_recv`.
+
+`plone/volto.vcl`, for Volto sites on top of `caching.vcl`:
+
+- `plone_volto_recv`: Volto's build under `/static/` comes from the cache for
+  logged in users too.
+- `plone_volto_backend_response`: pages that Volto renders have no
+  `Cache-Control`; for anonymous visitors they are cached for 30 seconds,
+  and banned by a PURGE of their URL like the content they show.
+
+### Plone settings
+
+Varnish only caches what Plone allows, so the caching settings decide how
+much it does.  Tried with Plone 6.2 (see the examples):
+
+- A new Classic UI site does not have plone.app.caching installed: install
+  it in Site Setup → Add-ons first.
+- In Site Setup → Caching, import the profile "With caching proxy", enable
+  caching and purging, with caching proxy `http://varnish:80` (the Varnish
+  service, directly, not through Traefik), and leave "Virtual host rewriting
+  takes place in front of the caching proxy" off: the rewrite happens behind
   Varnish.
-
-[example/docker-compose.yml](example/docker-compose.yml) is a whole stack
-(Traefik, Varnish, Volto, Plone) with the routers and rewrites for Volto, the
-REST API and `/ClassicUI`, and the one rewrite a Classic UI site needs
-instead.  Run it with `cd example && docker compose up -d --build` and open
-http://plone.localhost:8090.
-- **The client comes from `X-Forwarded-For`.**  Every proxy in front of
-  Varnish appends to it and trusts the one before it (Traefik:
-  `forwardedHeaders.trustedIPs`), and the first proxy you control does not
-  trust what the internet sends.
+- That profile caches resources (a year), files and feeds (a day) in
+  Varnish, but not pages: `plone.content.itemView` and
+  `plone.content.folderView` get `weakCaching`, which is `private`.  Map
+  them to `moderateCaching` to cache pages too.
+- Plone only purges the content types in "Content types to purge" (File,
+  Image and News Item by default).  Add the types whose pages you cache, or
+  an edited page stays old in Varnish until its TTL ends.
 
 ## Use
 
 Your `default.vcl` defines two ACLs and the number of proxy hops, and calls the
-subroutines.  See [example/default.vcl](example/default.vcl) for a whole one.
+subroutines.  [example/volto/default.vcl](example/volto/default.vcl) is a
+whole one; for Classic UI leave out `volto.vcl` and its two calls
+([example/classic/default.vcl](example/classic/default.vcl)).
 
 ```vcl
 vcl 4.1;
 
-include "zest/client.vcl";
-include "zest/protection.vcl";
+include "plone/client.vcl";
+include "plone/protection.vcl";
+include "plone/caching.vcl";
+include "plone/volto.vcl";           # Volto only
+
+backend traefik {
+    .host = "traefik";
+    .port = "8000";                  # Traefik's internal entrypoint
+}
 
 # The proxies between the client and Varnish, and nothing else: visitors on
 # an internal network have private addresses too.
-acl zest_proxies {
-    "10.0.1.0"/24;      # Traefik
+acl plone_proxies {
+    "10.0.1.0"/24;                   # Traefik
 }
 
 # Once per proxy hop, for example Traefik and a load balancer in front of it.
-sub zest_strip_proxies {
-    call zest_strip_proxy;
+sub plone_strip_proxies {
+    call plone_strip_proxy;
 }
 
 # Who may PURGE and BAN, directly (Plone).
-acl zest_purge {
+acl plone_purge {
     "localhost";
     "10.0.0.0"/8;
 }
 
 sub vcl_recv {
-    call zest_detect_client_ip;
-    call zest_block_junk;
-    if (req.method == "PURGE") {
-        call zest_purge_allowed;
-        return (purge);
-    }
-    # ...
+    set req.backend_hint = traefik;
+    call plone_detect_client_ip;
+    call plone_block_junk;
+    # Site specific redirects and blocks go here.
+    call plone_volto_recv;           # Volto only
+    call plone_recv;                 # last: it returns
 }
 
-sub vcl_miss { call zest_ratelimit; }
-sub vcl_pass { call zest_ratelimit; }
-sub vcl_backend_fetch { call zest_forward_client_ip; }
+sub vcl_miss { call plone_ratelimit; }
+sub vcl_pass { call plone_ratelimit; }
+sub vcl_pipe { call plone_forward_client_ip; }
+sub vcl_backend_fetch { call plone_forward_client_ip; }
+
+sub vcl_backend_response {
+    call plone_volto_backend_response;   # Volto only
+    call plone_backend_response;
+}
+
+sub vcl_deliver { call plone_deliver; }
+sub vcl_synth { call plone_synth; }
 ```
 
 Varnish refuses VCL with a subroutine that is never called, so once you
-include a file you have to call all of its `zest_*` subroutines.  That is on
-purpose: forgetting `zest_forward_client_ip` or `zest_ratelimit` is a
+include a file you have to call all of its `plone_*` subroutines.  That is on
+purpose: forgetting `plone_forward_client_ip` or `plone_ratelimit` is a
 compile error, not a hole you find later.
 
 The image, with your `default.vcl` on top:
 
 ```dockerfile
-FROM ghcr.io/zestsoftware/plone-varnish:1
+FROM ghcr.io/zestsoftware/plone-varnish:2
 COPY etc/varnish.vcl /etc/varnish/default.vcl
 ```
 
@@ -129,7 +218,7 @@ or use the image as it is, with `default.vcl` as a bind mount
 (`./varnish.vcl:/etc/varnish/default.vcl:ro`) or a Swarm config with target
 `/etc/varnish/default.vcl`.
 
-Tags: `1.2.3`, `1.2`, `1`, only for releases.  Pin a release; Dependabot or
+Tags: `2.1.3`, `2.1`, `2`, only for releases.  Pin a release; Dependabot or
 Renovate opens the update.
 
 ## Development
@@ -138,11 +227,11 @@ Renovate opens the update.
 make test
 ```
 
-builds the image, runs the varnishtest cases in `tests/` and compiles
-`example/default.vcl`.  Needs Docker.
+builds the image, runs the varnishtest cases in `tests/` and compiles the
+`default.vcl` of both examples.  Needs Docker.
 
 ## Release
 
 Add the version and date to `CHANGES.md`, commit, and push a tag with the
-version (`1.0.0`, no `v`).  CI tests it and pushes the image with the tags
-`1.0.0`, `1.0` and `1`.
+version (`2.0.0`, no `v`).  CI tests it and pushes the image with the tags
+`2.0.0`, `2.0` and `2`.

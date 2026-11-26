@@ -1,0 +1,110 @@
+varnishtest "plone/volto.vcl"
+
+server s1 {
+    # A page rendered by Volto, without Cache-Control: once.
+    rxreq
+    expect req.url == "/news"
+    txresp -hdr "Content-Type: text/html; charset=utf-8" -body "<html>news</html>"
+
+    # The REST API without Cache-Control: twice.
+    rxreq
+    expect req.url == "/++api++/news"
+    txresp -hdr "Content-Type: application/json" -body "{}"
+    rxreq
+    expect req.url == "/++api++/news"
+    txresp -hdr "Content-Type: application/json" -body "{}"
+
+    # Volto's build, asked by a logged in user: without the cookie, once.
+    rxreq
+    expect req.url == "/static/js/client.abc123.js"
+    expect req.http.Cookie == <undef>
+    txresp -hdr "Cache-Control: public, max-age=31536000" -body "js"
+
+    # A page for a logged in user: passed, with the cookie.
+    rxreq
+    expect req.url == "/news"
+    expect req.http.Cookie == "auth_token=abc"
+    txresp -hdr "Content-Type: text/html; charset=utf-8" -body "<html>editor</html>"
+
+    # After the PURGE of /news, the page is rendered again.
+    rxreq
+    expect req.url == "/news"
+    txresp -hdr "Content-Type: text/html; charset=utf-8" -body "<html>news 2</html>"
+
+    # Classic UI without Cache-Control: not cached, so twice.
+    rxreq
+    expect req.url == "/ClassicUI/folder_contents"
+    txresp -hdr "Content-Type: text/html; charset=utf-8" -body "classic"
+    rxreq
+    expect req.url == "/ClassicUI/folder_contents"
+    txresp -hdr "Content-Type: text/html; charset=utf-8" -body "classic"
+} -start
+
+varnish v1 -vcl+backend {
+    include "plone/client.vcl";
+    include "plone/protection.vcl";
+    include "plone/caching.vcl";
+    include "plone/volto.vcl";
+
+    acl plone_proxies { "192.0.2.0"/24; }
+    sub plone_strip_proxies { call plone_strip_proxy; }
+    acl plone_purge { "127.0.0.1"; }
+
+    sub vcl_recv {
+        call plone_detect_client_ip;
+        call plone_block_junk;
+        call plone_volto_recv;
+        call plone_recv;
+    }
+    sub vcl_miss { call plone_ratelimit; }
+    sub vcl_pass { call plone_ratelimit; }
+    sub vcl_backend_fetch { call plone_forward_client_ip; }
+    sub vcl_backend_response {
+        call plone_volto_backend_response;
+        call plone_backend_response;
+    }
+    sub vcl_deliver { call plone_deliver; }
+    sub vcl_synth { call plone_synth; }
+} -start
+
+client c1 {
+    txreq -url "/news" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "YES - Volto page, 30.000"
+    expect resp.http.x-plone-volto == <undef>
+    txreq -url "/news" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+
+    txreq -url "/++api++/news" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "NO - no Cache-Control"
+    txreq -url "/++api++/news" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+
+    txreq -url "/static/js/client.abc123.js" -hdr "Host: www.example.org" -hdr "Cookie: auth_token=abc"
+    rxresp
+    expect resp.body == "js"
+    txreq -url "/static/js/client.abc123.js" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+
+    txreq -url "/news" -hdr "Host: www.example.org" -hdr "Cookie: auth_token=abc"
+    rxresp
+    expect resp.body == "<html>editor</html>"
+
+    txreq -req PURGE -url "/news" -hdr "Host: varnish"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/news" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.body == "<html>news 2</html>"
+
+    txreq -url "/ClassicUI/folder_contents" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cacheable == "NO - no Cache-Control"
+    txreq -url "/ClassicUI/folder_contents" -hdr "Host: www.example.org"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+} -run
