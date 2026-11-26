@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 (unreleased)
+
+
+- Nothing changed yet.
+
+
 ## 1.1.0 (2026-11-26)
 
 - Neutral names, so that any Plone project (and cookieplone) can use it: the
