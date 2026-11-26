@@ -1,0 +1,240 @@
+varnishtest "zest_block_junk"
+
+server s1 {
+} -start
+
+varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
+    include "zest/client.vcl";
+    include "zest/protection.vcl";
+
+    acl zest_proxies { "127.0.0.1"; }
+    sub zest_strip_proxies { call zest_strip_proxy; }
+    acl zest_purge { "127.0.0.1"; }
+
+    # Whatever zest_block_junk lets through gets a 200 from Varnish.
+    sub vcl_recv {
+        call zest_detect_client_ip;
+        call zest_block_junk;
+        return (synth(200, "allowed"));
+    }
+} -start
+
+# Legitimate requests must pass.
+client c1 {
+    txreq -url "/"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/robots.txt"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/sitemap.xml.gz"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/sitemap.xml"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/.well-known/security.txt"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/favicon.ico"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/++webresource++46b1cbc3/++plone++static/bundle-plone/bundle.min.js.map"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/static/js/client.4f2a.chunk.js"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/++api++/@search?SearchableText=%22wp-login.php%22&b_start:int=20"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/@@search?SearchableText=../../etc/passwd&sort_on=Date"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/news/item/image.jpg/@@images/image/preview"
+    rxresp
+    expect resp.status == 200
+    # Uploads deeper in the site, with extensions that are blocked in the root.
+    txreq -url "/documents/report.zip"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/documents/data.json"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/documents/slides.key"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/documents/README.md"
+    rxresp
+    expect resp.status == 200
+    # Valid UTF-8: 2, 3 and 4 bytes.
+    txreq -url "/nieuws/caf%C3%A9"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/prijs-%E2%82%AC"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/smile-%F0%9F%98%80"
+    rxresp
+    expect resp.status == 200
+    # Names that look like the blocked ones.
+    txreq -url "/profile"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/environment"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/about/php-course"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/M-dossier"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/a,b,c"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/test/"
+    rxresp
+    expect resp.status == 200
+    txreq -url "/folder" -hdr "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# One or more of each kind of junk.
+client c2 {
+    txreq -url "/" -hdr "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    rxresp
+    expect resp.status == 403
+
+    txreq -req CONNECT -url "proxy.example:443"
+    rxresp
+    expect resp.status == 405
+    txreq -req TRACE -url "/"
+    rxresp
+    expect resp.status == 405
+
+    # Invalid UTF-8, traversal, characters that are never in a path.
+    txreq -url "/fonts/%B2ID%E9%A3%9A9.%A6%5E%F5%F7"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/fonts/%C0%8E%C0%FA"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/..%2F..%2F..%2Fetc%2Fpasswd"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/cgi-bin/.%2e/%2e%2e/etc/passwd"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/css/%5C%22../fonts/x"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/news%5Cu002Fitem"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/bundle-plone/===e.key%7C%7C/"
+    rxresp
+    expect resp.status == 400
+    txreq -url "/bundle-plone/==typeof%20e&&/"
+    rxresp
+    expect resp.status == 400
+
+    # SVG path data and comma lists.
+    txreq -url "/fonts/M1468%201156q28%20-28%2048%20-76t20"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/fonts/zero,a,c,d,e,g"
+    rxresp
+    expect resp.status == 404
+
+    # Anywhere.
+    txreq -url "/site/.git/config"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/.env"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/fonts/flanders/.notdef"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/wp-login.php"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/index.PHP"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/index.php~"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/config/database.yml"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/terraform.tfstate"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/storage/logs/laravel.log"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/fonts/flanders/three.tosf"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/node_modules/bootstrap/scss/_grid.scss"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/themas/klimaat/phpinfo/"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/@@site-logo/phpinfo/"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/instance/config.py"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/config/master.key"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/id_rsa"
+    rxresp
+    expect resp.status == 404
+
+    # Only in the root.
+    txreq -url "/www.zip"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/backup.tar.gz"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/package.json"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/appsettings.json"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/config/production.json"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/webpack.config.js"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/Makefile"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/Autodiscover/autodiscover.xml"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/remote/login?lang=en"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/actuator/env"
+    rxresp
+    expect resp.status == 404
+
+    # b_start:int that is not an integer.
+    txreq -url "/search?b_start:int="
+    rxresp
+    expect resp.status == 400
+    txreq -url "/search?SearchableText=x&b_start%3Aint=1%27%20or%201=1&x=y"
+    rxresp
+    expect resp.status == 400
+} -run

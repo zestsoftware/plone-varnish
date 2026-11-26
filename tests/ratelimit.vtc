@@ -1,0 +1,67 @@
+varnishtest "zest_ratelimit"
+
+# vsthrottle is a token bucket: it starts full and refills at limit/period
+# (10 or 30 per second).  Allowed requests get a 204 from Varnish itself, so
+# the requests are fast and only a few tokens come back during the test; a
+# few requests of slack before the expected 429 absorb those.
+
+server s1 {
+} -start
+
+varnish v1 -arg "-p vcc_feature=-err_unref" -vcl+backend {
+    include "zest/client.vcl";
+    include "zest/protection.vcl";
+
+    acl zest_proxies { "127.0.0.1"; }
+    sub zest_strip_proxies { call zest_strip_proxy; }
+    acl zest_purge { "127.0.0.1"; }
+
+    sub vcl_recv {
+        call zest_detect_client_ip;
+        return (pass);
+    }
+    sub vcl_pass {
+        call zest_ratelimit;
+        return (synth(204));
+    }
+} -start
+
+client c1 {
+    # Anonymous: 100.
+    loop 100 {
+        txreq -hdr "X-Forwarded-For: 192.0.2.10"
+        rxresp
+        expect resp.status == 204
+    }
+    loop 5 {
+        txreq -hdr "X-Forwarded-For: 192.0.2.10"
+        rxresp
+    }
+    txreq -hdr "X-Forwarded-For: 192.0.2.10"
+    rxresp
+    expect resp.status == 429
+
+    # Another client has its own budget.
+    txreq -hdr "X-Forwarded-For: 192.0.2.11"
+    rxresp
+    expect resp.status == 204
+
+    # The same client logged in has its own budget too.
+    txreq -hdr "X-Forwarded-For: 192.0.2.10" -hdr "Cookie: x=1; __ac=abc"
+    rxresp
+    expect resp.status == 204
+
+    # Logged in (cookie or Authorization): 300.
+    loop 300 {
+        txreq -hdr "X-Forwarded-For: 192.0.2.20" -hdr "Cookie: x=1; __ac=abc"
+        rxresp
+        expect resp.status == 204
+    }
+    loop 10 {
+        txreq -hdr "X-Forwarded-For: 192.0.2.20" -hdr "Authorization: Basic eDp5"
+        rxresp
+    }
+    txreq -hdr "X-Forwarded-For: 192.0.2.20" -hdr "Cookie: auth_token=abc"
+    rxresp
+    expect resp.status == 429
+} -run

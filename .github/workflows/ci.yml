@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+
+  test:
+    name: "varnishtest and example compile"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test
+        run: make test
+
+  image:
+    name: "Image"
+    needs:
+      - test
+    if: ${{ github.event_name != 'pull_request' }}
+    uses: plone/meta/.github/workflows/container-image-build-push.yml@2.x
+    permissions:
+      contents: read
+      packages: write
+    with:
+      base-tag: ${{ github.ref_name }}
+      working-directory: "."
+      image-name-prefix: ghcr.io/zestsoftware/plone
+      image-name-suffix: varnish
+      platforms: linux/amd64,linux/arm64
+      push: true
+    secrets:
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}
