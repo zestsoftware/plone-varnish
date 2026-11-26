@@ -1,6 +1,6 @@
 IMAGE ?= plone-varnish:test
 
-.PHONY: build test
+.PHONY: build test release
 
 build:
 	docker build -t $(IMAGE) .
@@ -14,3 +14,12 @@ test: build
 			-c 'varnishd -C -f /etc/varnish/default.vcl > /dev/null 2> /tmp/vcc.log || { grep -v "^#" /tmp/vcc.log | tail -20; exit 1; }' || exit 1; \
 	done
 	@echo "All tests passed."
+
+# A release with zest.releaser, from an up to date main: the version from
+# version.txt, CHANGES.md, a tag, back to development, push.  CI builds the
+# image from the tag.
+release:
+	@test "$$(git branch --show-current)" = "main" || { echo "Release from main, not $$(git branch --show-current)."; exit 1; }
+	git fetch origin main
+	@test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main is not the same as origin/main: pull or push first."; exit 1; }
+	uvx --from zest.releaser fullrelease

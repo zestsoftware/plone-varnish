@@ -232,17 +232,19 @@ builds the image, runs the varnishtest cases in `tests/` and compiles the
 
 ## Release
 
-With [zest.releaser](https://zestreleaser.readthedocs.io/), on `main`:
+On an up to date `main`:
 
 ```
-uvx --from zest.releaser fullrelease
+make release
 ```
 
-It takes the version from `version.txt` (`1.1.0.dev0` becomes `1.1.0`), dates
-the section in `CHANGES.md`, commits, tags (`1.1.0`, no `v`), goes back to
-development (`1.1.1.dev0`, a new changelog section) and pushes.  This is no
-Python package, so it builds and uploads nothing.  On the tag, CI checks that
-the tag matches `version.txt`, tests, and pushes the image with the tags
+This runs `uvx --from zest.releaser fullrelease`
+([zest.releaser](https://zestreleaser.readthedocs.io/)).  It takes the
+version from `version.txt` (`1.1.0.dev0` becomes `1.1.0`), dates the section
+in `CHANGES.md`, commits, tags (`1.1.0`, no `v`), goes back to development
+(`1.1.1.dev0`, a new changelog section) and pushes.  This is no Python
+package, so it builds and uploads nothing.  On the tag, CI checks that the
+tag matches `version.txt`, tests, and pushes the image with the tags
 `1.1.0`, `1.1` and `1`.
 
 ## License
