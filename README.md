@@ -129,8 +129,8 @@ or use the image as it is, with `default.vcl` as a bind mount
 (`./varnish.vcl:/etc/varnish/default.vcl:ro`) or a Swarm config with target
 `/etc/varnish/default.vcl`.
 
-Tags: `1.2.3`, `1.2`, `1` for releases, `main` and `latest` for the main
-branch.  Pin a release; Dependabot or Renovate opens the update.
+Tags: `1.2.3`, `1.2`, `1`, only for releases.  Pin a release; Dependabot or
+Renovate opens the update.
 
 ## Development
 

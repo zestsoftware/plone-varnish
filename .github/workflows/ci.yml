@@ -30,7 +30,9 @@ jobs:
     name: "Image"
     needs:
       - test
-    if: ${{ github.event_name != 'pull_request' }}
+    # Only for release tags: a release pushes main and the tag at once, which
+    # are two runs, and only one of them should build and publish.
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
     uses: plone/meta/.github/workflows/container-image-build-push.yml@2.x
     permissions:
       contents: read
