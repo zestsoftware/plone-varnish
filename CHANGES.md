@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 (unreleased)
+## 1.1.0 (2026-11-26)
 
 - Neutral names, so that any Plone project (and cookieplone) can use it: the
   subroutines are `plone_*` instead of `zest_*`, the ACLs `plone_proxies` and
