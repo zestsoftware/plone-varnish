@@ -1,19 +1,201 @@
 # plone-varnish
 
-Varnish for Plone sites, Classic UI and Volto: caching, protection against
-scanners and scrapers, and a rate limit, as VCL include files and as an image.
-The image is the official `varnish` image with the includes in
-`/etc/varnish/plone/`.
+**The first line of defense for your Plone site, right behind the firewall.**
 
-A site keeps a short `default.vcl` with what differs per site (backend, ACLs,
-its own redirects or blocks) and includes these files.  Improvements to the
-rules then reach every site with a new image tag, instead of being copied
-from project to project.
+The firewall lets every HTTP request through.  Varnish is the first to look
+at what a request asks for, so that is where the bad ones should stop.
+plone-varnish answers scanners, scrapers and malformed requests in Varnish
+itself, in microseconds, and lets only real visitors through to Plone, from
+a cache that knows how Plone works.  For Classic UI and Volto.
 
-- [example/volto/](example/volto/): a Volto site, Traefik, Varnish, Volto
-  and Plone.
-- [example/classic/](example/classic/): a Classic UI site, Traefik, Varnish
-  and Plone.
+**Defense**
+
+- ✅ **Stops vulnerability scans.**  `.php`, `wp-login`, `.env`, `.git`,
+  `node_modules`, `/etc/passwd`, private keys, the login pages of other
+  software: answered by Varnish, never by Plone.  Of 2,257 scanner requests
+  in one day on a production site, Varnish answered 1,753 itself.
+- ✅ **Rejects requests that crash Plone.**  Invalid UTF-8, path traversal and
+  a `b_start:int` that is not a number get a 400, not a server error.
+- ✅ **Rate limits scrapers.**  100 backend requests per 10 seconds per
+  client, 300 for logged in users.  Cache hits don't count, so real visitors
+  never notice.
+- ✅ **Knows the real client.**  The client address comes only from proxies
+  you trust; a forged `X-Forwarded-For` is dropped before Plone sees it.
+- ✅ **Locks PURGE and BAN.**  Accepted only directly from your own
+  containers, never from the internet.
+
+**Caching**
+
+- ✅ **Caches Plone right.**  It follows plone.app.caching, never caches logged
+  in users, drops tracking cookies, and caches Volto's pages and build.
+- ✅ **Purges reliably.**  Plone's purge requests hit, whatever host name they
+  are sent with.
+- ✅ **Keeps the site up.**  Stale pages are served while Plone restarts or is
+  slow.
+
+**Maintenance**
+
+- ✅ **One image, one short file.**  Your site keeps a `default.vcl` of about
+  50 lines; better rules reach every site with a new image tag.
+- ✅ **Tested.**  A varnishtest for every rule, and examples that run against
+  Plone 6.2 and Volto 19.
+
+## Use it
+
+Traefik hands every request to Varnish.  What Varnish does not answer itself
+goes back to Traefik on an internal entrypoint, which adds the
+VirtualHostMonster path and routes it to Volto or Plone:
+
+```
+client → Traefik (public) → Varnish → Traefik (internal, rewrite) → Volto / Plone
+```
+
+### 1. `docker-compose.yml`
+
+A Volto site.  The routers to Volto and Plone are on the internal entrypoint
+only, so nobody can skip Varnish:
+
+```yaml
+services:
+  traefik:
+    image: traefik:v3.7
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.internal.address=:8000
+      - --entrypoints.internal.forwardedHeaders.trustedIPs=172.31.231.11
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      default:
+        ipv4_address: 172.31.231.10
+
+  varnish:
+    image: ghcr.io/zestsoftware/plone-varnish:1
+    volumes:
+      - ./default.vcl:/etc/varnish/default.vcl:ro
+    networks:
+      default:
+        ipv4_address: 172.31.231.11
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.svc-varnish.loadbalancer.server.port=80
+      - traefik.http.routers.rt-public.rule=Host(`plone.localhost`)
+      - traefik.http.routers.rt-public.entrypoints=web
+      - traefik.http.routers.rt-public.service=svc-varnish
+
+  frontend:
+    image: plone/plone-frontend:19.8.2
+    environment:
+      RAZZLE_INTERNAL_API_PATH: http://backend:8080/Plone
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.svc-frontend.loadbalancer.server.port=3000
+      - traefik.http.routers.rt-frontend.rule=Host(`plone.localhost`)
+      - traefik.http.routers.rt-frontend.entrypoints=internal
+      - traefik.http.routers.rt-frontend.service=svc-frontend
+
+  backend:
+    image: plone/plone-backend:6.2.3
+    environment:
+      SITE: Plone
+    volumes:
+      - data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.svc-backend.loadbalancer.server.port=8080
+      - traefik.http.routers.rt-api.rule=Host(`plone.localhost`) && PathPrefix(`/++api++`)
+      - traefik.http.routers.rt-api.entrypoints=internal
+      - traefik.http.routers.rt-api.service=svc-backend
+      - traefik.http.routers.rt-api.middlewares=mw-vhm-api
+      - "traefik.http.middlewares.mw-vhm-api.replacepathregex.regex=^/\\+\\+api\\+\\+($$|/.*)"
+      - "traefik.http.middlewares.mw-vhm-api.replacepathregex.replacement=/VirtualHostBase/http/plone.localhost:80/Plone/++api++/VirtualHostRoot$$1"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.231.0/24
+
+volumes:
+  data: {}
+```
+
+### 2. `default.vcl`
+
+Next to it.  Only what is specific to your site: the backend, your proxies
+and who may purge.  Everything else comes from the includes.
+
+```vcl
+vcl 4.1;
+
+include "plone/client.vcl";
+include "plone/protection.vcl";
+include "plone/caching.vcl";
+include "plone/volto.vcl";               # Volto only
+
+backend traefik {
+    .host = "traefik";
+    .port = "8000";                      # Traefik's internal entrypoint
+}
+
+# The proxies between the client and Varnish, and nothing else.
+acl plone_proxies {
+    "172.31.231.10";                     # Traefik
+}
+
+# Once per proxy hop: here only Traefik.
+sub plone_strip_proxies {
+    call plone_strip_proxy;
+}
+
+# Who may PURGE and BAN, directly: the containers of the stack.
+acl plone_purge {
+    "localhost";
+    "172.31.231.0"/24;
+}
+
+sub vcl_recv {
+    set req.backend_hint = traefik;
+    call plone_detect_client_ip;
+    call plone_block_junk;
+    # Your own redirects and blocks go here.
+    call plone_volto_recv;               # Volto only
+    call plone_recv;                     # last: it returns
+}
+
+sub vcl_miss { call plone_ratelimit; }
+sub vcl_pass { call plone_ratelimit; }
+sub vcl_pipe { call plone_forward_client_ip; }
+sub vcl_backend_fetch { call plone_forward_client_ip; }
+
+sub vcl_backend_response {
+    call plone_volto_backend_response;   # Volto only
+    call plone_backend_response;
+}
+
+sub vcl_deliver { call plone_deliver; }
+sub vcl_synth { call plone_synth; }
+```
+
+### 3. Plone
+
+Install plone.app.caching, import "With caching proxy", and enable purging to
+`http://varnish:80`.  Varnish caches only what Plone allows, so these
+settings decide how much it can do: see [Plone settings](#plone-settings).
+
+### Classic UI
+
+Leave out the frontend, `volto.vcl` and its two calls, and route all paths on
+the internal entrypoint to Plone with one rewrite: `^/(.*)` →
+`/VirtualHostBase/http/plone.localhost:80/Plone/VirtualHostRoot/$1`.
+
+### Try it
+
+Both setups are in [example/](example/), with every line explained:
 
 ```
 cd example/volto          # or example/classic
@@ -22,7 +204,9 @@ open http://plone.localhost:8090      # 8091 for classic; admin / admin
 docker compose down -v
 ```
 
-## How requests go
+## How it works
+
+### How requests go
 
 ```
 client → (load balancer) → Traefik, public entrypoint → Varnish
@@ -44,7 +228,7 @@ client → (load balancer) → Traefik, public entrypoint → Varnish
   Traefik's internal entrypoint trusts Varnish, so Plone and Volto see the
   client.
 
-## The includes
+### The includes
 
 `plone/client.vcl`
 
@@ -122,7 +306,7 @@ client → (load balancer) → Traefik, public entrypoint → Varnish
   `Cache-Control`; for anonymous visitors they are cached for 30 seconds,
   and banned by a PURGE of their URL like the content they show.
 
-### Plone settings
+## Plone settings
 
 Varnish only caches what Plone allows, so the caching settings decide how
 much it does.  Tried with Plone 6.2 (see the examples):
@@ -142,65 +326,7 @@ much it does.  Tried with Plone 6.2 (see the examples):
   Image and News Item by default).  Add the types whose pages you cache, or
   an edited page stays old in Varnish until its TTL ends.
 
-## Use
-
-Your `default.vcl` defines two ACLs and the number of proxy hops, and calls the
-subroutines.  [example/volto/default.vcl](example/volto/default.vcl) is a
-whole one; for Classic UI leave out `volto.vcl` and its two calls
-([example/classic/default.vcl](example/classic/default.vcl)).
-
-```vcl
-vcl 4.1;
-
-include "plone/client.vcl";
-include "plone/protection.vcl";
-include "plone/caching.vcl";
-include "plone/volto.vcl";           # Volto only
-
-backend traefik {
-    .host = "traefik";
-    .port = "8000";                  # Traefik's internal entrypoint
-}
-
-# The proxies between the client and Varnish, and nothing else: visitors on
-# an internal network have private addresses too.
-acl plone_proxies {
-    "10.0.1.0"/24;                   # Traefik
-}
-
-# Once per proxy hop, for example Traefik and a load balancer in front of it.
-sub plone_strip_proxies {
-    call plone_strip_proxy;
-}
-
-# Who may PURGE and BAN, directly (Plone).
-acl plone_purge {
-    "localhost";
-    "10.0.0.0"/8;
-}
-
-sub vcl_recv {
-    set req.backend_hint = traefik;
-    call plone_detect_client_ip;
-    call plone_block_junk;
-    # Site specific redirects and blocks go here.
-    call plone_volto_recv;           # Volto only
-    call plone_recv;                 # last: it returns
-}
-
-sub vcl_miss { call plone_ratelimit; }
-sub vcl_pass { call plone_ratelimit; }
-sub vcl_pipe { call plone_forward_client_ip; }
-sub vcl_backend_fetch { call plone_forward_client_ip; }
-
-sub vcl_backend_response {
-    call plone_volto_backend_response;   # Volto only
-    call plone_backend_response;
-}
-
-sub vcl_deliver { call plone_deliver; }
-sub vcl_synth { call plone_synth; }
-```
+## The image
 
 Varnish refuses VCL with a subroutine that is never called, so once you
 include a file you have to call all of its `plone_*` subroutines.  That is on
