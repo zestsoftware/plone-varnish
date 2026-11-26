@@ -39,6 +39,12 @@ a cache that knows how Plone works.  For Classic UI and Volto.
   50 lines; better rules reach every site with a new image tag.
 - ✅ **Tested.**  A varnishtest for every rule, and examples that run against
   Plone 6.2 and Volto 19.
+- ✅ **Actively maintained.**  Zest Software maintains it and keeps the rules
+  up to date with what scanners try next.
+
+Please try it on your site and tell us how it goes.  A request that should
+have been blocked, a page that should have been cached, a rule that stops a
+real visitor: [open an issue](https://github.com/zestsoftware/plone-varnish/issues).
 
 ## Use it
 
